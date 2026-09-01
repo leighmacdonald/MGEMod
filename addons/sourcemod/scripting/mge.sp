@@ -68,6 +68,7 @@ enum
 // ====[ VARIABLES ]===================================================
 // Handle, String, Float, Bool, NUM, TFCT
 bool
+    g_bDBFunc, // Does the database driver support stored procs (and bigint steamids)
     g_bNoStats,
     g_bNoDisplayRating;
 
@@ -85,7 +86,6 @@ char g_sMapName[256],
      g_spawnFile[128];
 
 bool g_bBlockFallDamage,
-     g_bUseSQLite,
      g_bAutoCvar;
 
 int
@@ -93,7 +93,7 @@ int
     g_iAirshotHeight = 80;
 
 // Database
-Database db; // Connection to SQL database.
+Database g_db; // Connection to SQL database.
 Handle g_hDBReconnectTimer;
 
 char g_sDBConfig[256];
@@ -577,9 +577,9 @@ void OnProjectileTouch(int entity, int other)
  *
  * Called once a client is fully in-game, and authorized with Steam.
  * Client-specific variables are initialized here.
- * 
+ *
  * NOTE: This needs to not be here. This will break when steam is down, this probably has other issues as well
- * 
+ *
  * Most of this should be in OnClientPutInServer
  * -------------------------------------------------------------------------- */
 public void OnClientPostAdminCheck(int client)
@@ -614,10 +614,14 @@ public void OnClientPostAdminCheck(int client)
         {
             char steamid_dirty[31], steamid[64], query[256];
             GetClientAuthId(client, AuthId_Steam2, steamid_dirty, sizeof(steamid_dirty));
-            db.Escape(steamid_dirty, steamid, sizeof(steamid));
+            g_db.Escape(steamid_dirty, steamid, sizeof(steamid));
             strcopy(g_sPlayerSteamID[client], 32, steamid);
-            Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid='%s' LIMIT 1", steamid);
-            db.Query(T_SQLQueryOnConnect, query, client);
+            if (g_bDBFunc) {
+                Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid=text_to_steam64('%s')", steamid);
+            } else {
+                Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid='%s'", steamid);
+            }
+            g_db.Query(T_SQLQueryOnConnect, query, client);
         }
     }
 
@@ -2170,8 +2174,8 @@ void CalcELO(int winner, int loser)
     int time = GetTime();
     char query[512], sCleanArenaname[128], sCleanMapName[128];
 
-    db.Escape(g_sArenaName[g_iPlayerArena[winner]], sCleanArenaname, sizeof(sCleanArenaname));
-    db.Escape(g_sMapName, sCleanMapName, sizeof(sCleanMapName));
+    g_db.Escape(g_sArenaName[g_iPlayerArena[winner]], sCleanArenaname, sizeof(sCleanArenaname));
+    g_db.Escape(g_sMapName, sCleanMapName, sizeof(sCleanMapName));
 
     if (IsValidClient(winner) && !g_bNoDisplayRating)
         MC_PrintToChat(winner, "%t", "GainedPoints", winnerscore);
@@ -2184,27 +2188,37 @@ void CalcELO(int winner, int loser)
     int winner_team_slot = (g_iPlayerSlot[winner] > 2) ? (g_iPlayerSlot[winner] - 2) : g_iPlayerSlot[winner];
     int loser_team_slot = (g_iPlayerSlot[loser] > 2) ? (g_iPlayerSlot[loser] - 2) : g_iPlayerSlot[loser];
 
-    // DB entry for this specific duel.
-    if (g_bUseSQLite)
-    {
-        Format(query, sizeof(query), "INSERT INTO mgemod_duels VALUES ('%s', '%s', %i, %i, %i, %i, '%s', '%s')",
-            g_sPlayerSteamID[winner], g_sPlayerSteamID[loser], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
-        db.Query(SQLErrorCheckCallback, query);
-    } else {
-        Format(query, sizeof(query), "INSERT INTO mgemod_duels (winner, loser, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES ('%s', '%s', %i, %i, %i, %i, '%s', '%s')",
-            g_sPlayerSteamID[winner], g_sPlayerSteamID[loser], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
-        db.Query(SQLErrorCheckCallback, query);
+    if (g_bDBFunc) {
+        Format(query, sizeof(query), "INSERT INTO mgemod_duels (winner, loser, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES (text_to_steam64('%s'), text_to_steam64('%s'), %i, %i, %i, %i, '%s', '%s')",
+                g_sPlayerSteamID[winner], g_sPlayerSteamID[loser], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
+            g_db.Query(SQLErrorCheckCallback, query);
+
+        //winner's stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[winner], time, g_sPlayerSteamID[winner]);
+        g_db.Query(SQLErrorCheckCallback, query);
+
+        //loser's stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[loser], time, g_sPlayerSteamID[loser]);
+        g_db.Query(SQLErrorCheckCallback, query);
+
+        return;
     }
+
+    Format(query, sizeof(query), "INSERT INTO mgemod_duels (winner, loser, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES ('%s', '%s', %i, %i, %i, %i, '%s', '%s')",
+        g_sPlayerSteamID[winner], g_sPlayerSteamID[loser], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //winner's stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid='%s'",
-        g_iPlayerRating[winner], time, g_sPlayerSteamID[winner]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_iPlayerRating[winner], time, g_sPlayerSteamID[winner]);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //loser's stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid='%s'",
         g_iPlayerRating[loser], time, g_sPlayerSteamID[loser]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_db.Query(SQLErrorCheckCallback, query);
 }
 
 void CalcELO2(int winner, int winner2, int loser, int loser2)
@@ -2233,8 +2247,8 @@ void CalcELO2(int winner, int winner2, int loser, int loser2)
     int time = GetTime();
     char query[512], sCleanArenaname[128], sCleanMapName[128];
 
-    db.Escape(g_sArenaName[g_iPlayerArena[winner]], sCleanArenaname, sizeof(sCleanArenaname));
-    db.Escape(g_sMapName, sCleanMapName, sizeof(sCleanMapName));
+    g_db.Escape(g_sArenaName[g_iPlayerArena[winner]], sCleanArenaname, sizeof(sCleanArenaname));
+    g_db.Escape(g_sMapName, sCleanMapName, sizeof(sCleanMapName));
 
     if (IsValidClient(winner) && !g_bNoDisplayRating)
         MC_PrintToChat(winner, "%t", "GainedPoints", winnerscore);
@@ -2248,38 +2262,56 @@ void CalcELO2(int winner, int winner2, int loser, int loser2)
     if (IsValidClient(loser2) && !g_bNoDisplayRating)
         MC_PrintToChat(loser2, "%t", "LostPoints", loserscore);
 
+    if (g_bDBFunc) {
+        Format(query, sizeof(query), "INSERT INTO mgemod_duels_2v2 (winner, winner2, loser, loser2, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES (text_to_steam64('%s'), text_to_steam64('%s'), text_to_steam64('%s'), text_to_steam64('%s'), %i, %i, %i, %i, '%s', '%s')",
+                g_sPlayerSteamID[winner], g_sPlayerSteamID[winner2], g_sPlayerSteamID[loser], g_sPlayerSteamID[loser2], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
+        g_db.Query(SQLErrorCheckCallback, query);
 
-    // DB entry for this specific duel.
-    if (g_bUseSQLite)
-    {
-        Format(query, sizeof(query), "INSERT INTO mgemod_duels_2v2 VALUES ('%s', '%s', '%s', '%s', %i, %i, %i, %i, '%s', '%s')",
-            g_sPlayerSteamID[winner], g_sPlayerSteamID[winner2], g_sPlayerSteamID[loser], g_sPlayerSteamID[loser2], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
-        db.Query(SQLErrorCheckCallback, query);
-    } else {
-        Format(query, sizeof(query), "INSERT INTO mgemod_duels_2v2 (winner, winner2, loser, loser2, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES ('%s', '%s', '%s', '%s', %i, %i, %i, %i, '%s', '%s')",
-            g_sPlayerSteamID[winner], g_sPlayerSteamID[winner2], g_sPlayerSteamID[loser], g_sPlayerSteamID[loser2], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
-        db.Query(SQLErrorCheckCallback, query);
+        //winner's stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[winner], time, g_sPlayerSteamID[winner]);
+        g_db.Query(SQLErrorCheckCallback, query);
+
+        //winner's teammate stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[winner2], time, g_sPlayerSteamID[winner2]);
+        g_db.Query(SQLErrorCheckCallback, query);
+
+        //loser's stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[loser], time, g_sPlayerSteamID[loser]);
+        g_db.Query(SQLErrorCheckCallback, query);
+
+        //loser's teammate stats
+        Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid=text_to_steam64('%s')",
+            g_iPlayerRating[loser2], time, g_sPlayerSteamID[loser2]);
+        g_db.Query(SQLErrorCheckCallback, query);
+        return;
     }
+
+    Format(query, sizeof(query), "INSERT INTO mgemod_duels_2v2 (winner, winner2, loser, loser2, winnerscore, loserscore, winlimit, gametime, mapname, arenaname) VALUES ('%s', '%s', '%s', '%s', %i, %i, %i, %i, '%s', '%s')",
+        g_sPlayerSteamID[winner], g_sPlayerSteamID[winner2], g_sPlayerSteamID[loser], g_sPlayerSteamID[loser2], g_iArenaScore[arena_index][winner_team_slot], g_iArenaScore[arena_index][loser_team_slot], g_iArenaFraglimit[arena_index], time, g_sMapName, g_sArenaName[arena_index]);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //winner's stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid='%s'",
         g_iPlayerRating[winner], time, g_sPlayerSteamID[winner]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //winner's teammate stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,wins=wins+1,lastplayed=%i WHERE steamid='%s'",
         g_iPlayerRating[winner2], time, g_sPlayerSteamID[winner2]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //loser's stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid='%s'",
         g_iPlayerRating[loser], time, g_sPlayerSteamID[loser]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_db.Query(SQLErrorCheckCallback, query);
 
     //loser's teammate stats
     Format(query, sizeof(query), "UPDATE mgemod_stats SET rating=%i,losses=losses+1,lastplayed=%i WHERE steamid='%s'",
         g_iPlayerRating[loser2], time, g_sPlayerSteamID[loser2]);
-    db.Query(SQLErrorCheckCallback, query);
+    g_db.Query(SQLErrorCheckCallback, query);
 }
 // ====[ UTIL ]====================================================
 bool LoadSpawnPoints()
@@ -2312,134 +2344,127 @@ bool LoadSpawnPoints()
     int i;
     g_iArenaCount = 0;
 
-    for (int j = 0; j <= MAXARENAS; j++)
-    {
+    for (int j = 0; j <= MAXARENAS; j++) {
         g_iArenaSpawns[j] = 0;
     }
 
-    if (FileToKeyValues(kv, txtfile))
-    {
-        if (KvGotoFirstSubKey(kv))
-        {
-            do
-            {
-                KvGetSectionName(kv, kvmap, 64);
-                if (StrEqual(g_sMapName, kvmap, false))
-                {
-                    if (KvGotoFirstSubKey(kv))
-                    {
-                        do
-                        {
-                            g_iArenaCount++;
-                            KvGetSectionName(kv, g_sArenaOriginalName[g_iArenaCount], 64);
-                            int id;
-                            if (KvGetNameSymbol(kv, "1", id))
-                            {
-                                char intstr[4];
-                                char intstr2[4];
-                                do
-                                {
-                                    g_iArenaSpawns[g_iArenaCount]++;
-                                    IntToString(g_iArenaSpawns[g_iArenaCount], intstr, sizeof(intstr));
-                                    IntToString(g_iArenaSpawns[g_iArenaCount]+1, intstr2, sizeof(intstr2));
-                                    KvGetString(kv, intstr, spawn, sizeof(spawn));
-                                    count = ExplodeString(spawn, " ", spawnCo, 6, 16);
-                                    if (count==6)
-                                    {
-                                        for (i=0; i<3; i++)
-                                        {
-                                            g_fArenaSpawnOrigin[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i] = StringToFloat(spawnCo[i]);
-                                        }
-                                        for (i=3; i<6; i++)
-                                        {
-                                            g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i-3] = StringToFloat(spawnCo[i]);
-                                        }
-                                    } else if(count==4) {
-                                        for (i=0; i<3; i++)
-                                        {
-                                            g_fArenaSpawnOrigin[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i] = StringToFloat(spawnCo[i]);
-                                        }
-                                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][0] = 0.0;
-                                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][1] = StringToFloat(spawnCo[3]);
-                                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][2] = 0.0;
-                                    } else {
-                                        SetFailState("Error in cfg file. Wrong number of parametrs (%d) on spawn <%i> in arena <%s>",count,g_iArenaSpawns[g_iArenaCount],g_sArenaOriginalName[g_iArenaCount]);
-                                    }
-                                } while (KvGetNameSymbol(kv, intstr2, id));
-                                LogMessage("Loaded %d spawns on arena %s.",g_iArenaSpawns[g_iArenaCount], g_sArenaOriginalName[g_iArenaCount]);
-                            } else {
-                                LogError("Could not load spawns on arena %s.", g_sArenaOriginalName[g_iArenaCount]);
-                            }
-
-                            if (KvGetNameSymbol(kv, "cap", id)) {
-                                KvGetString(kv, "cap",  g_sArenaCap[g_iArenaCount], 64);
-                                g_bArenaHasCap[g_iArenaCount] = true;
-
-                                LogMessage("Found cap point on arena %s.", g_sArenaOriginalName[g_iArenaCount]);
-                            } else {
-                                g_bArenaHasCap[g_iArenaCount] = false;
-                            }
-
-                            if (KvGetNameSymbol(kv, "cap_trigger", id)) {
-                                KvGetString(kv, "cap_trigger",  g_sArenaCapTrigger[g_iArenaCount], 64);
-                                g_bArenaHasCapTrigger[g_iArenaCount] = true;
-                            }
-
-                            //optional parametrs
-                            g_iArenaMgelimit[g_iArenaCount] = KvGetNum(kv, "fraglimit", g_iDefaultFragLimit);
-                            g_iArenaCaplimit[g_iArenaCount] = KvGetNum(kv, "caplimit", g_iDefaultFragLimit);
-                            g_iArenaMinRating[g_iArenaCount] = KvGetNum(kv, "minrating", -1);
-                            g_iArenaMaxRating[g_iArenaCount] = KvGetNum(kv, "maxrating", -1);
-                            g_bArenaMidair[g_iArenaCount] = KvGetNum(kv, "midair", 0) ? true : false ;
-                            g_iArenaCdTime[g_iArenaCount] = KvGetNum(kv, "cdtime", DEFAULT_CDTIME);
-                            g_bArenaMGE[g_iArenaCount] = KvGetNum(kv, "mge", 0) ? true : false ;
-                            g_fArenaHPRatio[g_iArenaCount] = KvGetFloat(kv, "hpratio", 1.5);
-                            g_bArenaEndif[g_iArenaCount] = KvGetNum(kv, "endif", 0) ? true : false ;
-                            g_iArenaAirshotHeight[g_iArenaCount] = KvGetNum(kv, "airshotheight", 250);
-                            g_bArenaBoostVectors[g_iArenaCount] = KvGetNum(kv, "boostvectors", 0) ? true : false ;
-                            g_bArenaBBall[g_iArenaCount] = KvGetNum(kv, "bball", 0) ? true : false ;
-                            g_bVisibleHoops[g_iArenaCount] = KvGetNum(kv, "vishoop", 0) ? true : false ;
-                            g_iArenaEarlyLeave[g_iArenaCount] = KvGetNum(kv, "earlyleave", 0);
-                            g_bArenaInfAmmo[g_iArenaCount] = KvGetNum(kv, "infammo", 1) ? true : false ;
-                            g_bArenaShowHPToPlayers[g_iArenaCount] = KvGetNum(kv, "showhp", 1) ? true : false ;
-                            g_fArenaMinSpawnDist[g_iArenaCount] = KvGetFloat(kv, "mindist", 100.0);
-                            g_bFourPersonArena[g_iArenaCount] = KvGetNum(kv, "4player", 0) ? true : false;
-                            g_bArenaAllowChange[g_iArenaCount] = KvGetNum(kv, "allowchange", 0) ? true : false;
-                            g_bArenaAllowKoth[g_iArenaCount] = KvGetNum(kv, "allowkoth", 0) ? true : false;
-                            g_bArenaKothTeamSpawn[g_iArenaCount] = KvGetNum(kv, "kothteamspawn", 0) ? true : false;
-                            g_fArenaRespawnTime[g_iArenaCount] = KvGetFloat(kv, "respawntime", 0.1);
-                            g_bArenaAmmomod[g_iArenaCount] = KvGetNum(kv, "ammomod", 0) ? true : false;
-                            g_bArenaUltiduo[g_iArenaCount] = KvGetNum(kv, "ultiduo", 0) ? true : false;
-                            g_bArenaKoth[g_iArenaCount] = KvGetNum(kv, "koth", 0) ? true : false;
-                            g_bArenaTurris[g_iArenaCount] = KvGetNum(kv, "turris", 0) ? true : false;
-                            g_iDefaultCapTime[g_iArenaCount] = KvGetNum(kv, "timer", 180);
-                            //parsing allowed classes for current arena
-                            char sAllowedClasses[128];
-                            KvGetString(kv, "classes", sAllowedClasses, sizeof(sAllowedClasses));
-                            LogMessage("%s classes: <%s>", g_sArenaOriginalName[g_iArenaCount], sAllowedClasses);
-                            ParseAllowedClasses(sAllowedClasses,g_tfctArenaAllowedClasses[g_iArenaCount]);
-                            g_iArenaFraglimit[g_iArenaCount] = g_iArenaMgelimit[g_iArenaCount];
-                            UpdateArenaName(g_iArenaCount);
-                        } while (KvGotoNextKey(kv));
-                    }
-                    break;
-                }
-            } while (KvGotoNextKey(kv));
-            if (g_iArenaCount)
-            {
-                LogMessage("Loaded %d arenas. MGEMod enabled.",g_iArenaCount);
-                CloseHandle(kv);
-                return true;
-            } else {
-                CloseHandle(kv);
-                return false;
-            }
-        } else {
-            LogError("Error in cfg file.");
-            return false;
-        }
-    } else {
+    if (!FileToKeyValues(kv, txtfile)) {
         LogError("Error. Can't find cfg file");
+        return false;
+    }
+    if (!KvGotoFirstSubKey(kv)) {
+        LogError("Error in cfg file.");
+        return false;
+    }
+    do {
+        KvGetSectionName(kv, kvmap, 64);
+        if (!StrEqual(g_sMapName, kvmap, false)) {
+            continue;
+        }
+        if (!KvGotoFirstSubKey(kv)) {
+            break;
+        }
+        do {
+            g_iArenaCount++;
+            KvGetSectionName(kv, g_sArenaOriginalName[g_iArenaCount], 64);
+            int id;
+            if (KvGetNameSymbol(kv, "1", id))
+            {
+                char intstr[4];
+                char intstr2[4];
+                do
+                {
+                    g_iArenaSpawns[g_iArenaCount]++;
+                    IntToString(g_iArenaSpawns[g_iArenaCount], intstr, sizeof(intstr));
+                    IntToString(g_iArenaSpawns[g_iArenaCount]+1, intstr2, sizeof(intstr2));
+                    KvGetString(kv, intstr, spawn, sizeof(spawn));
+                    count = ExplodeString(spawn, " ", spawnCo, 6, 16);
+                    if (count==6)
+                    {
+                        for (i=0; i<3; i++)
+                        {
+                            g_fArenaSpawnOrigin[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i] = StringToFloat(spawnCo[i]);
+                        }
+                        for (i=3; i<6; i++)
+                        {
+                            g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i-3] = StringToFloat(spawnCo[i]);
+                        }
+                    } else if(count==4) {
+                        for (i=0; i<3; i++)
+                        {
+                            g_fArenaSpawnOrigin[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][i] = StringToFloat(spawnCo[i]);
+                        }
+                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][0] = 0.0;
+                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][1] = StringToFloat(spawnCo[3]);
+                        g_fArenaSpawnAngles[g_iArenaCount][g_iArenaSpawns[g_iArenaCount]][2] = 0.0;
+                    } else {
+                        SetFailState("Error in cfg file. Wrong number of parametrs (%d) on spawn <%i> in arena <%s>",count,g_iArenaSpawns[g_iArenaCount],g_sArenaOriginalName[g_iArenaCount]);
+                    }
+                } while (KvGetNameSymbol(kv, intstr2, id));
+                LogMessage("Loaded %d spawns on arena %s.",g_iArenaSpawns[g_iArenaCount], g_sArenaOriginalName[g_iArenaCount]);
+            } else {
+                LogError("Could not load spawns on arena %s.", g_sArenaOriginalName[g_iArenaCount]);
+            }
+
+            if (KvGetNameSymbol(kv, "cap", id)) {
+                KvGetString(kv, "cap",  g_sArenaCap[g_iArenaCount], 64);
+                g_bArenaHasCap[g_iArenaCount] = true;
+
+                LogMessage("Found cap point on arena %s.", g_sArenaOriginalName[g_iArenaCount]);
+            } else {
+                g_bArenaHasCap[g_iArenaCount] = false;
+            }
+
+            if (KvGetNameSymbol(kv, "cap_trigger", id)) {
+                KvGetString(kv, "cap_trigger",  g_sArenaCapTrigger[g_iArenaCount], 64);
+                g_bArenaHasCapTrigger[g_iArenaCount] = true;
+            }
+
+            //optional parametrs
+            g_iArenaMgelimit[g_iArenaCount] = KvGetNum(kv, "fraglimit", g_iDefaultFragLimit);
+            g_iArenaCaplimit[g_iArenaCount] = KvGetNum(kv, "caplimit", g_iDefaultFragLimit);
+            g_iArenaMinRating[g_iArenaCount] = KvGetNum(kv, "minrating", -1);
+            g_iArenaMaxRating[g_iArenaCount] = KvGetNum(kv, "maxrating", -1);
+            g_bArenaMidair[g_iArenaCount] = KvGetNum(kv, "midair", 0) ? true : false ;
+            g_iArenaCdTime[g_iArenaCount] = KvGetNum(kv, "cdtime", DEFAULT_CDTIME);
+            g_bArenaMGE[g_iArenaCount] = KvGetNum(kv, "mge", 0) ? true : false ;
+            g_fArenaHPRatio[g_iArenaCount] = KvGetFloat(kv, "hpratio", 1.5);
+            g_bArenaEndif[g_iArenaCount] = KvGetNum(kv, "endif", 0) ? true : false ;
+            g_iArenaAirshotHeight[g_iArenaCount] = KvGetNum(kv, "airshotheight", 250);
+            g_bArenaBoostVectors[g_iArenaCount] = KvGetNum(kv, "boostvectors", 0) ? true : false ;
+            g_bArenaBBall[g_iArenaCount] = KvGetNum(kv, "bball", 0) ? true : false ;
+            g_bVisibleHoops[g_iArenaCount] = KvGetNum(kv, "vishoop", 0) ? true : false ;
+            g_iArenaEarlyLeave[g_iArenaCount] = KvGetNum(kv, "earlyleave", 0);
+            g_bArenaInfAmmo[g_iArenaCount] = KvGetNum(kv, "infammo", 1) ? true : false ;
+            g_bArenaShowHPToPlayers[g_iArenaCount] = KvGetNum(kv, "showhp", 1) ? true : false ;
+            g_fArenaMinSpawnDist[g_iArenaCount] = KvGetFloat(kv, "mindist", 100.0);
+            g_bFourPersonArena[g_iArenaCount] = KvGetNum(kv, "4player", 0) ? true : false;
+            g_bArenaAllowChange[g_iArenaCount] = KvGetNum(kv, "allowchange", 0) ? true : false;
+            g_bArenaAllowKoth[g_iArenaCount] = KvGetNum(kv, "allowkoth", 0) ? true : false;
+            g_bArenaKothTeamSpawn[g_iArenaCount] = KvGetNum(kv, "kothteamspawn", 0) ? true : false;
+            g_fArenaRespawnTime[g_iArenaCount] = KvGetFloat(kv, "respawntime", 0.1);
+            g_bArenaAmmomod[g_iArenaCount] = KvGetNum(kv, "ammomod", 0) ? true : false;
+            g_bArenaUltiduo[g_iArenaCount] = KvGetNum(kv, "ultiduo", 0) ? true : false;
+            g_bArenaKoth[g_iArenaCount] = KvGetNum(kv, "koth", 0) ? true : false;
+            g_bArenaTurris[g_iArenaCount] = KvGetNum(kv, "turris", 0) ? true : false;
+            g_iDefaultCapTime[g_iArenaCount] = KvGetNum(kv, "timer", 180);
+            //parsing allowed classes for current arena
+            char sAllowedClasses[128];
+            KvGetString(kv, "classes", sAllowedClasses, sizeof(sAllowedClasses));
+            LogMessage("%s classes: <%s>", g_sArenaOriginalName[g_iArenaCount], sAllowedClasses);
+            ParseAllowedClasses(sAllowedClasses,g_tfctArenaAllowedClasses[g_iArenaCount]);
+            g_iArenaFraglimit[g_iArenaCount] = g_iArenaMgelimit[g_iArenaCount];
+            UpdateArenaName(g_iArenaCount);
+        } while (KvGotoNextKey(kv));
+
+    } while (KvGotoNextKey(kv));
+
+    if (g_iArenaCount) {
+        LogMessage("Loaded %d arenas. MGEMod enabled.",g_iArenaCount);
+        CloseHandle(kv);
+        return true;
+    } else {
+        CloseHandle(kv);
         return false;
     }
 }
@@ -2937,7 +2962,7 @@ int Menu_Top5(Menu menu, MenuAction action, int param1, int param2)
                 char query[256];
                 Format(query, sizeof(query), "SELECT rating,name FROM mgemod_stats ORDER BY rating DESC LIMIT %i, 5", g_iELOMenuPage[param1] * 5);
                 //new data[] = {param1, param2+5, false};
-                db.Query(T_SQL_Top5, query, param1);
+                g_db.Query(T_SQL_Top5, query, param1);
             }
             //If the player selected back show the previous menu
             if (param2 == 1)
@@ -2948,14 +2973,14 @@ int Menu_Top5(Menu menu, MenuAction action, int param1, int param2)
                     char query[256];
                     Format(query, sizeof(query), "SELECT rating,name FROM mgemod_stats ORDER BY rating DESC LIMIT 5");
                     //new data[] = {param1, param2-5, true};
-                    db.Query(T_SQL_Top5, query, param1);
+                    g_db.Query(T_SQL_Top5, query, param1);
                 }
                 else
                 {
                     char query[256];
                     Format(query, sizeof(query), "SELECT rating,name FROM mgemod_stats ORDER BY rating DESC LIMIT %i, 5", g_iELOMenuPage[param1] * 5);
                     //new data[] = {param1, param2-5, false};
-                    db.Query(T_SQL_Top5, query, param1);
+                    g_db.Query(T_SQL_Top5, query, param1);
                 }
             }
         }
@@ -3148,7 +3173,7 @@ Action Command_Top5(int client, int args)
     g_iELOMenuPage[client] = 0;
     char query[256];
     Format(query, sizeof(query), "SELECT rating,name FROM mgemod_stats ORDER BY rating DESC LIMIT 5");
-    db.Query(T_SQL_Top5, query, client);
+    g_db.Query(T_SQL_Top5, query, client);
     return Plugin_Continue;
 }
 
@@ -3532,7 +3557,7 @@ Action Command_ConnectionTest(int client, int args)
 
     char query[256];
     Format(query, sizeof(query), "SELECT rating FROM mgemod_stats LIMIT 1");
-    db.Query(T_SQL_Test, query, client);
+    g_db.Query(T_SQL_Test, query, client);
 
     return Plugin_Handled;
 }
@@ -3830,34 +3855,44 @@ void PrepareSQL() // Opens the connection to the database, and creates the table
     }
 
     char ident[16];
-    db.Driver.GetIdentifier(ident, sizeof(ident));
+    g_db.Driver.GetIdentifier(ident, sizeof(ident));
 
-    if (StrEqual(ident, "mysql", false))
-    {
-        g_bUseSQLite = false;
-    }
-    else if (StrEqual(ident, "sqlite", false))
-    {
-        g_bUseSQLite = true;
-    }
-    else
-    {
-        SetFailState("Invalid database.");
+    if (StrEqual(ident, "sqlite", false)) {
+        g_bDBFunc = false;
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_stats (rating INTEGER, steamid TEXT, name TEXT, wins INTEGER, losses INTEGER, lastplayed INTEGER, hitblip INTEGER)");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels (winner TEXT, loser TEXT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels_2v2 (winner TEXT, winner2 TEXT, loser TEXT, loser2 TEXT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
+    } else if (StrEqual(ident, "pgsql", false)) {
+        g_bDBFunc = true;
+        g_db.Query(SQLErrorCheckCallback, "CREATE OR REPLACE FUNCTION text_to_steam64(steam_id text) RETURNS bigint \
+    LANGUAGE plpgsql as $func$ DECLARE parts text[]; BEGIN \
+        if steam_id = 'BOT' then return 0; end if; \
+        if starts_with(steam_id, '76561') then return cast(steam_id as bigint); end if; \
+        parts := regexp_matches(steam_id, '^STEAM_([0-5]):([0-1]):([0-9]+)$'); \
+        return (cast(parts[3] as bigint) * 2) + 76561197960265728 + cast(parts[2] as bigint); \
+    END; $func$;");
+        // Not currently using foreign keys since i don't want to diverge from the base mod schema too much and hard depend on other stuff.
+        // I, however, refuse to store steamids as text, so upstream may not want this.
+        // TODO Use the native sm 64bit when its in production.
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_stats (rating INTEGER, steamid BIGINT, name TEXT, wins INTEGER, losses INTEGER, lastplayed INTEGER, hitblip INTEGER)");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels (duel_id serial, winner BIGINT, loser BIGINT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels_2v2 (duel2_id serial, winner BIGINT, winner2 BIGINT, loser BIGINT, loser2 BIGINT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
+    } else if (StrEqual(ident, "mysql", false)) {
+        // Untested.
+        g_bDBFunc = true;
+        g_db.Query(SQLErrorCheckCallback, "DELIMITER // CREATE PROCEDURE text_to_steam64( IN input_steam_id VARCHAR(255), OUT output_steam_id VARCHAR(255) ) BEGIN SET output_steam_id = input_steam_id; END //// DELIMITER ;");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_stats (rating INT(4) NOT NULL, steamid VARCHAR(32) NOT NULL, name VARCHAR(64) NOT NULL, wins INT(4) NOT NULL, losses INT(4) NOT NULL, lastplayed INT(11) NOT NULL, hitblip INT(2) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels (winner VARCHAR(32) NOT NULL, loser VARCHAR(32) NOT NULL, winnerscore INT(4) NOT NULL, loserscore INT(4) NOT NULL, winlimit INT(4) NOT NULL, gametime INT(11) NOT NULL, mapname VARCHAR(64) NOT NULL, arenaname VARCHAR(32) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
+        g_db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels_2v2 (winner VARCHAR(32) NOT NULL, winner2 VARCHAR(32) NOT NULL, loser VARCHAR(32) NOT NULL, loser2 VARCHAR(32) NOT NULL, winnerscore INT(4) NOT NULL, loserscore INT(4) NOT NULL, winlimit INT(4) NOT NULL, gametime INT(11) NOT NULL, mapname VARCHAR(64) NOT NULL, arenaname VARCHAR(32) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
+    } else {
+        SetFailState("Invalid database driver: %s", ident);
+        return;
     }
 
-    if (g_bUseSQLite)
-    {
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_stats (rating INTEGER, steamid TEXT, name TEXT, wins INTEGER, losses INTEGER, lastplayed INTEGER, hitblip INTEGER)");
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels (winner TEXT, loser TEXT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels_2v2 (winner TEXT, winner2 TEXT, loser TEXT, loser2 TEXT, winnerscore INTEGER, loserscore INTEGER, winlimit INTEGER, gametime INTEGER, mapname TEXT, arenaname TEXT) ");
-    }
-    else
-    {
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_stats (rating INT(4) NOT NULL, steamid VARCHAR(32) NOT NULL, name VARCHAR(64) NOT NULL, wins INT(4) NOT NULL, losses INT(4) NOT NULL, lastplayed INT(11) NOT NULL, hitblip INT(2) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels (winner VARCHAR(32) NOT NULL, loser VARCHAR(32) NOT NULL, winnerscore INT(4) NOT NULL, loserscore INT(4) NOT NULL, winlimit INT(4) NOT NULL, gametime INT(11) NOT NULL, mapname VARCHAR(64) NOT NULL, arenaname VARCHAR(32) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
-        db.Query(SQLErrorCheckCallback, "CREATE TABLE IF NOT EXISTS mgemod_duels_2v2 (winner VARCHAR(32) NOT NULL, winner2 VARCHAR(32) NOT NULL, loser VARCHAR(32) NOT NULL, loser2 VARCHAR(32) NOT NULL, winnerscore INT(4) NOT NULL, loserscore INT(4) NOT NULL, winlimit INT(4) NOT NULL, gametime INT(11) NOT NULL, mapname VARCHAR(64) NOT NULL, arenaname VARCHAR(32) NOT NULL) DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci ENGINE = InnoDB ");
-    }
-
+    // There was no indexes/pk at all before except sqlite ROWID i guess..?, is there something im missing?
+    // Removed the `LIMIT 1` queries.
+    g_db.Query(SQLErrorCheckCallback, "CREATE UNIQUE INDEX IF NOT EXISTS mgemod_stats_uidx ON mgemod_stats (steamid)");
+    g_db.Query(SQLErrorCheckCallback, "CREATE INDEX IF NOT EXISTS mgemod_stats_rating_idx ON mgemod_stats (rating)");
 }
 
 void T_SQLQueryOnConnect(Database owner, DBResultSet hndl, const char[] error, any data)
@@ -3879,7 +3914,7 @@ void T_SQLQueryOnConnect(Database owner, DBResultSet hndl, const char[] error, a
     char query[512];
     char namesql_dirty[MAX_NAME_LENGTH], namesql[(MAX_NAME_LENGTH * 2) + 1];
     GetClientName(client, namesql_dirty, sizeof(namesql_dirty));
-    db.Escape(namesql_dirty, namesql, sizeof(namesql));
+    g_db.Escape(namesql_dirty, namesql, sizeof(namesql));
 
     if (hndl.FetchRow())
     {
@@ -3887,18 +3922,19 @@ void T_SQLQueryOnConnect(Database owner, DBResultSet hndl, const char[] error, a
         g_bHitBlip[client] = hndl.FetchInt(1) == 1;
         g_iPlayerWins[client] = hndl.FetchInt(2);
         g_iPlayerLosses[client] = hndl.FetchInt(3);
-
-        Format(query, sizeof(query), "UPDATE mgemod_stats SET name='%s' WHERE steamid='%s'", namesql, g_sPlayerSteamID[client]);
-        db.Query(SQLErrorCheckCallback, query);
+        if (g_bDBFunc) {
+            Format(query, sizeof(query), "UPDATE mgemod_stats SET name='%s' WHERE steamid=text_to_steam64('%s')", namesql, g_sPlayerSteamID[client]);
+        } else {
+            Format(query, sizeof(query), "UPDATE mgemod_stats SET name='%s' WHERE steamid=%s", namesql, g_sPlayerSteamID[client]);
+        }
+        g_db.Query(SQLErrorCheckCallback, query);
     } else {
-        if (g_bUseSQLite)
-        {
-            Format(query, sizeof(query), "INSERT INTO mgemod_stats VALUES(1600, '%s', '%s', 0, 0, %i, 1)", g_sPlayerSteamID[client], namesql, GetTime());
-            db.Query(SQLErrorCheckCallback, query);
+        if (g_bDBFunc) {
+            Format(query, sizeof(query), "INSERT INTO mgemod_stats (rating, steamid, name, wins, losses, lastplayed, hitblip) VALUES (1600, text_to_steam64('%s'), '%s', 0, 0, %i, 1)", g_sPlayerSteamID[client], namesql, GetTime());
         } else {
             Format(query, sizeof(query), "INSERT INTO mgemod_stats (rating, steamid, name, wins, losses, lastplayed, hitblip) VALUES (1600, '%s', '%s', 0, 0, %i, 1)", g_sPlayerSteamID[client], namesql, GetTime());
-            db.Query(SQLErrorCheckCallback, query);
         }
+        g_db.Query(SQLErrorCheckCallback, query);
 
         g_iPlayerRating[client] = 1600;
         g_bHitBlip[client] = false;
@@ -4011,10 +4047,14 @@ void SQLDbConnTest(Database owner, DBResultSet hndl, const char[] error, any dat
                 {
                     char steamid_dirty[31], steamid[64], query[256];
                     GetClientAuthId(i, AuthId_Steam2, steamid_dirty, sizeof(steamid_dirty));
-                    db.Escape(steamid_dirty, steamid, sizeof(steamid));
+                    g_db.Escape(steamid_dirty, steamid, sizeof(steamid));
                     strcopy(g_sPlayerSteamID[i], 32, steamid);
-                    Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid='%s' LIMIT 1", steamid);
-                    db.Query(T_SQLQueryOnConnect, query, i);
+                    if (g_bDBFunc) {
+                        Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid=text_to_steam64('%s')", steamid);
+                    } else {
+                        Format(query, sizeof(query), "SELECT rating, hitblip, wins, losses FROM mgemod_stats WHERE steamid='%s'", steamid);
+                    }
+                    g_db.Query(T_SQLQueryOnConnect, query, i);
                 }
             }
 
@@ -5023,7 +5063,7 @@ Action Timer_ResetPlayer(Handle timer, int userid)
     {
         ResetPlayer(client);
     }
-    
+
     return Plugin_Continue;
 }
 
@@ -5033,7 +5073,7 @@ Action Timer_ChangePlayerSpec(Handle timer, any player)
     {
         ChangeClientTeam(player, TEAM_SPEC);
     }
-    
+
     return Plugin_Continue;
 }
 
@@ -5145,7 +5185,7 @@ Action Timer_ReconnectToDB(Handle timer)
 
     char query[256];
     Format(query, sizeof(query), "SELECT rating FROM mgemod_stats LIMIT 1");
-    db.Query(SQLDbConnTest, query);
+    g_db.Query(SQLDbConnTest, query);
 
     return Plugin_Continue;
 }

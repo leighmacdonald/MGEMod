@@ -1,10 +1,17 @@
-# MGEMod
+# MGEMod (pg/uncletopia)
 > A 1v1 and 2v2 training mod for Team Fortress 2
 
 For more info on MGEMod, see its AlliedMods thread and its TF2Wiki page.
 
 - [AlliedMods](https://forums.alliedmods.net/showthread.php?t=154755)
 - [TF2Wiki](http://wiki.teamfortress.com/wiki/MGE_Mod)
+
+## PG Changes
+
+- Use `BIGINT` for steamid column types instead of `TEXT`
+- Uses a new stored proc `text_to_steam64(text)` to convert the steam2/steam64 strings into an actual bigint for mysql/postgres during queries.
+- Adds unique index and drop the use of `LIMIT 1`
+- Adds index on ratings column.
 
 ## Downloading
 - Download the latest release [here](https://github.com/sapphonie/MGEMod/releases/latest), unzip it, and merge it into your `/tf/` folder.
